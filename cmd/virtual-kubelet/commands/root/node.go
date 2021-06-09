@@ -39,14 +39,11 @@ func NodeFromProvider(ctx context.Context, name string, taint *v1.Taint, p provi
 			Name: name,
 			Labels: map[string]string{
 				"type":                   "virtual-kubelet",
-				"kubernetes.io/role":     "agent",
+				"kubernetes.io/role":     "",
 				"beta.kubernetes.io/os":  strings.ToLower(p.OperatingSystem()),
 				"kubernetes.io/hostname": name,
 				"alpha.service-controller.kubernetes.io/exclude-balancer": "true",
 			},
-		},
-		Spec: v1.NodeSpec{
-			Taints: taints,
 		},
 		Status: v1.NodeStatus{
 			NodeInfo: v1.NodeSystemInfo{

@@ -128,7 +128,7 @@ func (p *FargateProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error 
 // UpdatePod takes a Kubernetes Pod and updates it within the provider.
 func (p *FargateProvider) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
 	log.Printf("Received UpdatePod request for %s/%s.\n", pod.Namespace, pod.Name)
-	return errNotImplemented
+	return nil
 }
 
 // DeletePod takes a Kubernetes Pod and deletes it from the provider.
@@ -183,7 +183,7 @@ func (p *FargateProvider) GetPodFullName(namespace string, pod string) string {
 // RunInContainer executes a command in a container in the pod, copying data
 // between in/out/err and the container's stdin/stdout/stderr.
 func (p *FargateProvider) RunInContainer(ctx context.Context, namespace, podName, containerName string, cmd []string, attach api.AttachIO) error {
-	return errNotImplemented
+	return nil
 }
 
 // GetPodStatus retrieves the status of a pod by name from the provider.
@@ -251,7 +251,7 @@ func (p *FargateProvider) NodeConditions(ctx context.Context) []corev1.NodeCondi
 
 	lastHeartbeatTime := metav1.Now()
 	lastTransitionTime := metav1.NewTime(p.lastTransitionTime)
-	lastTransitionReason := "Fargate cluster is ready"
+	lastTransitionReason := "KubeletReady"
 	lastTransitionMessage := "ok"
 
 	// Return static thumbs-up values for all conditions.
