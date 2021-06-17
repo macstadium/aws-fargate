@@ -4,17 +4,13 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
-	"github.com/aws/aws-sdk-go/service/ecs"
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
-	k8sTypes "k8s.io/apimachinery/pkg/types"
 )
 
 const (
@@ -104,167 +100,16 @@ func NewCluster(config *ClusterConfig) (*Cluster, error) {
 		}
 	}
 
-	// Load existing pod state from Fargate to the local cache.
-	err = cluster.loadPodState()
-	if err != nil {
-		return nil, err
-	}
-
 	return cluster, nil
 }
 
 // Create creates a new Fargate cluster.
 func (c *Cluster) create() error {
-	api := client.api
-
-	input := &ecs.CreateClusterInput{
-		ClusterName: aws.String(c.name),
-	}
-
-	log.Printf("Creating Fargate cluster %s in region %s", c.name, c.region)
-
-	output, err := api.CreateCluster(input)
-	if err != nil {
-		err = fmt.Errorf("failed to create cluster: %v", err)
-		log.Println(err)
-		return err
-	}
-
-	c.arn = aws.StringValue(output.Cluster.ClusterArn)
-	log.Printf("Created Fargate cluster %s in region %s", c.name, c.region)
-
 	return nil
 }
 
 // Describe loads information from an existing Fargate cluster.
 func (c *Cluster) describe() error {
-	api := client.api
-
-	input := &ecs.DescribeClustersInput{
-		Clusters: aws.StringSlice([]string{c.name}),
-	}
-
-	log.Printf("Looking for Fargate cluster %s in region %s.", c.name, c.region)
-
-	output, err := api.DescribeClusters(input)
-	if err != nil || len(output.Clusters) == 0 {
-		if len(output.Failures) > 0 {
-			err = fmt.Errorf("reason: %s", *output.Failures[0].Reason)
-		}
-		err = fmt.Errorf("failed to describe cluster: %v", err)
-		log.Println(err)
-		return err
-	}
-
-	log.Printf("Found Fargate cluster %s in region %s.", c.name, c.region)
-	c.arn = aws.StringValue(output.Clusters[0].ClusterArn)
-
-	return nil
-}
-
-// LoadPodState rebuilds pod and container objects in this cluster by loading existing tasks from
-// Fargate. This is done during startup and whenever the local state is suspected to be out of sync
-// with the actual state in Fargate. Caching state locally minimizes the number of service calls.
-func (c *Cluster) loadPodState() error {
-	api := client.api
-
-	log.Printf("Loading pod state from cluster %s.", c.name)
-
-	taskArns := make([]*string, 0)
-
-	// Get a list of all Fargate tasks running on this cluster.
-	err := api.ListTasksPages(
-		&ecs.ListTasksInput{
-			Cluster:       aws.String(c.name),
-			DesiredStatus: aws.String(ecs.DesiredStatusRunning),
-			LaunchType:    aws.String(ecs.LaunchTypeFargate),
-		},
-		func(page *ecs.ListTasksOutput, lastPage bool) bool {
-			taskArns = append(taskArns, page.TaskArns...)
-			return !lastPage
-		},
-	)
-
-	if err != nil {
-		err := fmt.Errorf("failed to load pod state: %v", err)
-		log.Println(err)
-		return err
-	}
-
-	log.Printf("Found %d tasks on cluster %s.", len(taskArns), c.name)
-
-	pods := make(map[string]*Pod)
-
-	// For each task running on this Fargate cluster...
-	for _, taskArn := range taskArns {
-		// Describe the task.
-		describeTasksOutput, err := api.DescribeTasks(
-			&ecs.DescribeTasksInput{
-				Cluster: aws.String(c.name),
-				Tasks:   []*string{taskArn},
-			},
-		)
-
-		if err != nil || len(describeTasksOutput.Tasks) != 1 {
-			log.Printf("Failed to describe task %s. Skipping.", *taskArn)
-			continue
-		}
-
-		task := describeTasksOutput.Tasks[0]
-
-		// Describe the task definition.
-		describeTaskDefinitionOutput, err := api.DescribeTaskDefinition(
-			&ecs.DescribeTaskDefinitionInput{
-				TaskDefinition: task.TaskDefinitionArn,
-			},
-		)
-
-		if err != nil {
-			log.Printf("Failed to describe task definition %s. Skipping.", *task.TaskDefinitionArn)
-			continue
-		}
-
-		taskDef := describeTaskDefinitionOutput.TaskDefinition
-
-		// A pod's tag is stored in its task definition's Family field.
-		tag := aws.StringValue(taskDef.Family)
-
-		// Rebuild the pod object.
-		// Not all tasks are necessarily pods. Skip tasks that do not have a valid tag.
-		pod, err := NewPodFromTag(c, tag)
-		if err != nil {
-			log.Printf("Skipping unknown task %s: %v", *taskArn, err)
-			continue
-		}
-
-		pod.uid = k8sTypes.UID(aws.StringValue(task.StartedBy))
-		pod.taskDefArn = aws.StringValue(task.TaskDefinitionArn)
-		pod.taskArn = aws.StringValue(task.TaskArn)
-		if taskDef.TaskRoleArn != nil {
-			pod.taskRoleArn = aws.StringValue(taskDef.TaskRoleArn)
-		}
-		pod.taskStatus = aws.StringValue(task.LastStatus)
-		pod.taskRefreshTime = time.Now()
-
-		// Rebuild the container objects.
-		for _, cntrDef := range taskDef.ContainerDefinitions {
-			cntr, _ := newContainerFromDefinition(cntrDef, task.CreatedAt)
-
-			pod.taskCPU += aws.Int64Value(cntr.definition.Cpu)
-			pod.taskMemory += aws.Int64Value(cntr.definition.Memory)
-			pod.containers[aws.StringValue(cntrDef.Name)] = cntr
-
-			log.Printf("Found pod %s/%s on cluster %s.", pod.namespace, pod.name, c.name)
-		}
-
-		pods[tag] = pod
-	}
-
-	// Update local state.
-	c.Lock()
-	c.pods = pods
-	c.Unlock()
-
 	return nil
 }
 

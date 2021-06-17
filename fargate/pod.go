@@ -59,8 +59,7 @@ type Pod struct {
 
 // NewPod creates a new Kubernetes pod on Fargate.
 func NewPod(cluster *Cluster, pod *corev1.Pod) (*Pod, error) {
-	api := client.api
-
+	log.Printf("New pod :%+v", pod)
 	// Initialize the pod.
 	fgPod := &Pod{
 		namespace:  pod.Namespace,
@@ -126,16 +125,6 @@ func NewPod(cluster *Cluster, pod *corev1.Pod) (*Pod, error) {
 
 	// Register the task definition with Fargate.
 	log.Printf("RegisterTaskDefinition input:%+v", taskDef)
-	output, err := api.RegisterTaskDefinition(taskDef)
-	if err != nil {
-		err = fmt.Errorf("failed to register task definition: %v", err)
-		return nil, err
-	}
-
-	log.Printf("RegisterTaskDefinition output:%+v", output)
-
-	// Save the registered task definition ARN.
-	fgPod.taskDefArn = *output.TaskDefinition.TaskDefinitionArn
 
 	if cluster != nil {
 		cluster.InsertPod(fgPod, tag)
@@ -166,7 +155,6 @@ func NewPodFromTag(cluster *Cluster, tag string) (*Pod, error) {
 
 // Start deploys and runs a Kubernetes pod on Fargate.
 func (pod *Pod) Start() error {
-	api := client.api
 
 	// Pods always get an ENI with a private IPv4 address in customer subnet.
 	// Assign a public IPv4 address to the ENI only if requested.
@@ -193,26 +181,12 @@ func (pod *Pod) Start() error {
 	}
 
 	log.Printf("RunTask input:%+v", runTaskInput)
-	runTaskOutput, err := api.RunTask(runTaskInput)
-	if err != nil || len(runTaskOutput.Tasks) == 0 {
-		if len(runTaskOutput.Failures) != 0 {
-			err = fmt.Errorf("reason: %s", *runTaskOutput.Failures[0].Reason)
-		}
-		err = fmt.Errorf("failed to run task: %v", err)
-		return err
-	}
-
-	log.Printf("RunTask output:%+v", runTaskOutput)
-	// Save the task ARN.
-	pod.taskArn = *runTaskOutput.Tasks[0].TaskArn
 
 	return nil
 }
 
 // Stop stops a running Kubernetes pod on Fargate.
 func (pod *Pod) Stop() error {
-	api := client.api
-
 	// Stop the task.
 	stopTaskInput := &ecs.StopTaskInput{
 		Cluster: aws.String(pod.cluster.name),
@@ -221,20 +195,6 @@ func (pod *Pod) Stop() error {
 	}
 
 	log.Printf("StopTask input:%+v", stopTaskInput)
-	stopTaskOutput, err := api.StopTask(stopTaskInput)
-	log.Printf("StopTask err:%+v output:%+v", err, stopTaskOutput)
-	if err != nil {
-		err = fmt.Errorf("failed to stop task: %v", err)
-		return err
-	}
-
-	// Deregister the task definition.
-	_, err = api.DeregisterTaskDefinition(&ecs.DeregisterTaskDefinitionInput{
-		TaskDefinition: aws.String(pod.taskDefArn),
-	})
-	if err != nil {
-		log.Printf("Failed to deregister task definition: %v", err)
-	}
 
 	// Remove the pod from its cluster.
 	if pod.cluster != nil {
@@ -246,22 +206,22 @@ func (pod *Pod) Stop() error {
 
 // GetSpec returns the specification of a Kubernetes pod on Fargate.
 func (pod *Pod) GetSpec() (*corev1.Pod, error) {
-	task, err := pod.describe()
+	_, err := pod.describe()
 	if err != nil {
 		return nil, err
 	}
 
-	return pod.getSpec(task)
+	return pod.getSpec()
 }
 
 // GetStatus returns the status of a Kubernetes pod on Fargate.
 func (pod *Pod) GetStatus() corev1.PodStatus {
-	task, err := pod.describe()
+	_, err := pod.describe()
 	if err != nil {
 		return corev1.PodStatus{Phase: corev1.PodUnknown}
 	}
 
-	return pod.getStatus(task)
+	return pod.getStatus()
 }
 
 // BuildTaskDefinitionTag returns the task definition tag for this pod.
@@ -327,40 +287,22 @@ func (pod *Pod) mapTaskSize() error {
 
 // Describe retrieves the status of a Kubernetes pod from Fargate.
 func (pod *Pod) describe() (*ecs.Task, error) {
-	api := client.api
 
-	// Describe the task.
-	describeTasksInput := &ecs.DescribeTasksInput{
-		Cluster: aws.String(pod.cluster.name),
-		Tasks:   []*string{aws.String(pod.taskArn)},
-	}
-
-	describeTasksOutput, err := api.DescribeTasks(describeTasksInput)
-	if err != nil || len(describeTasksOutput.Tasks) == 0 {
-		if len(describeTasksOutput.Failures) != 0 {
-			err = fmt.Errorf("reason: %s", *describeTasksOutput.Failures[0].Reason)
-		}
-		err = fmt.Errorf("failed to describe task: %v", err)
-		return nil, err
-	}
-
-	task := describeTasksOutput.Tasks[0]
-
-	pod.taskStatus = *task.LastStatus
+	pod.taskStatus = "RUNNING"
 	pod.taskRefreshTime = time.Now()
 
-	return task, nil
+	return nil, nil
 }
 
 // GetSpec returns the specification of a Kubernetes pod on Fargate.
-func (pod *Pod) getSpec(task *ecs.Task) (*corev1.Pod, error) {
-	containers := make([]corev1.Container, 0, len(task.Containers))
+func (pod *Pod) getSpec() (*corev1.Pod, error) {
+	containers := make([]corev1.Container, 0, len(pod.containers))
 
-	for _, c := range task.Containers {
-		cntrDef := pod.containers[*c.Name].definition
+	for name, c := range pod.containers {
+		cntrDef := c.definition
 
 		cntr := corev1.Container{
-			Name:    *c.Name,
+			Name:    name,
 			Image:   *cntrDef.Image,
 			Command: aws.StringValueSlice(cntrDef.EntryPoint),
 			Args:    aws.StringValueSlice(cntrDef.Command),
@@ -422,14 +364,14 @@ func (pod *Pod) getSpec(task *ecs.Task) (*corev1.Pod, error) {
 			Volumes:    []corev1.Volume{},
 			Containers: containers,
 		},
-		Status: pod.getStatus(task),
+		Status: pod.getStatus(),
 	}
 
 	return &podSpec, nil
 }
 
 // GetStatus returns the status of a Kubernetes pod on Fargate.
-func (pod *Pod) getStatus(task *ecs.Task) corev1.PodStatus {
+func (pod *Pod) getStatus() corev1.PodStatus {
 	// Translate task status to pod phase.
 	phase := corev1.PodUnknown
 
@@ -481,26 +423,11 @@ func (pod *Pod) getStatus(task *ecs.Task) corev1.PodStatus {
 
 	// Set the pod start time as the task creation time.
 	var startTime metav1.Time
-	if task.CreatedAt != nil {
-		startTime = metav1.NewTime(*task.CreatedAt)
-	}
-
-	// Set the pod IP address from the task ENI information.
-	privateIPv4Address := ""
-	for _, attachment := range task.Attachments {
-		if *attachment.Type == taskAttachmentENI {
-			for _, detail := range attachment.Details {
-				if *detail.Name == taskAttachmentENIPrivateIPv4Address {
-					privateIPv4Address = *detail.Value
-				}
-			}
-		}
-	}
 
 	// Get statuses from all containers in this pod.
-	containerStatuses := make([]corev1.ContainerStatus, 0, len(task.Containers))
-	for _, cntr := range task.Containers {
-		containerStatuses = append(containerStatuses, pod.containers[*cntr.Name].getStatus(cntr))
+	containerStatuses := make([]corev1.ContainerStatus, 0, len(pod.containers))
+	for _, cntr := range pod.containers {
+		containerStatuses = append(containerStatuses, pod.getContainerStatus(*cntr.definition.Name))
 	}
 
 	// Build the pod status structure to be reported.
@@ -509,8 +436,8 @@ func (pod *Pod) getStatus(task *ecs.Task) corev1.PodStatus {
 		Conditions:            conditions,
 		Message:               "",
 		Reason:                "",
-		HostIP:                privateIPv4Address,
-		PodIP:                 privateIPv4Address,
+		HostIP:                "",
+		PodIP:                 "",
 		StartTime:             &startTime,
 		InitContainerStatuses: nil,
 		ContainerStatuses:     containerStatuses,
@@ -518,4 +445,28 @@ func (pod *Pod) getStatus(task *ecs.Task) corev1.PodStatus {
 	}
 
 	return status
+}
+
+// GetStatus returns the status of a container running in Fargate.
+func (pod *Pod) getContainerStatus(name string) corev1.ContainerStatus {
+	var state corev1.ContainerState
+	var isReady bool
+
+	isReady = true
+
+	state = corev1.ContainerState{
+		Running: &corev1.ContainerStateRunning{
+			StartedAt: metav1.NewTime(time.Now()),
+		},
+	}
+
+	return corev1.ContainerStatus{
+		Name:         name,
+		State:        state,
+		Ready:        isReady,
+		RestartCount: 0,
+		Image:        "",
+		ImageID:      "",
+		ContainerID:  "",
+	}
 }
