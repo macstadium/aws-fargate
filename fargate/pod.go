@@ -3,6 +3,7 @@ package fargate
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"strconv"
 	"strings"
 	"time"
@@ -436,8 +437,8 @@ func (pod *Pod) getStatus() corev1.PodStatus {
 		Conditions:            conditions,
 		Message:               "",
 		Reason:                "",
-		HostIP:                "",
-		PodIP:                 "",
+		HostIP:                genIpaddr(),
+		PodIP:                 genIpaddr(),
 		StartTime:             &startTime,
 		InitContainerStatuses: nil,
 		ContainerStatuses:     containerStatuses,
@@ -469,4 +470,10 @@ func (pod *Pod) getContainerStatus(name string) corev1.ContainerStatus {
 		ImageID:      "",
 		ContainerID:  "",
 	}
+}
+
+func genIpaddr() string {
+	rand.Seed(time.Now().Unix())
+	ip := fmt.Sprintf("10.%d.%d.%d", rand.Intn(255), rand.Intn(255), rand.Intn(255))
+	return ip
 }
